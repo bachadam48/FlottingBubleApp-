@@ -18,11 +18,9 @@ jobs:
       - name: Extract project zip if present
         run: |
           set -e
-          # Cas 1 : le ZIP du projet est à la racine
           if [ -f "FloatingBubbleApp.zip" ]; then
             echo "Extraction de FloatingBubbleApp.zip..."
             unzip -o FloatingBubbleApp.zip -d _extracted
-            # Si le zip contient un dossier FloatingBubbleApp/
             if [ -d "_extracted/FloatingBubbleApp" ]; then
               cp -a _extracted/FloatingBubbleApp/. .
             else
@@ -31,49 +29,27 @@ jobs:
             rm -rf _extracted
             echo "Extraction terminée."
           fi
-
-          # Cas 2 : un autre zip android à la racine
-          for z in *.zip; do
-            [ -f "$z" ] || continue
-            [ "$z" = "FloatingBubbleApp.zip" ] && continue
-            if unzip -l "$z" 2>/dev/null | grep -q "settings.gradle"; then
-              echo "Extraction de $z..."
-              unzip -o "$z" -d _extracted
-              if [ -d "_extracted/FloatingBubbleApp" ]; then
-                cp -a _extracted/FloatingBubbleApp/. .
-              else
-                cp -a _extracted/. .
-              fi
-              rm -rf _extracted
-              break
-            fi
-          done
-
-          echo "=== Fichiers après extraction ==="
-          find . -maxdepth 3 -type f ! -path "./.git/*" | head -60
+          echo "=== Fichiers projet ==="
+          find . -maxdepth 3 -type f ! -path "./.git/*" ! -name "*.zip" | head -40
 
       - name: Detect project root
         id: root
         run: |
           if [ -f "settings.gradle.kts" ] || [ -f "settings.gradle" ]; then
             echo "dir=." >> "$GITHUB_OUTPUT"
-            echo "Project root: ."
           elif [ -f "FloatingBubbleApp/settings.gradle.kts" ]; then
             echo "dir=FloatingBubbleApp" >> "$GITHUB_OUTPUT"
-            echo "Project root: FloatingBubbleApp"
           else
-            FOUND=$(find . -maxdepth 3 \( -name "settings.gradle.kts" -o -name "settings.gradle" \) ! -path "./.git/*" 2>/dev/null | head -1)
+            FOUND=$(find . -maxdepth 3 \( -name "settings.gradle.kts" -o -name "settings.gradle" \) ! -path "./.git/*" | head -1)
             if [ -n "$FOUND" ]; then
-              DIR=$(dirname "$FOUND")
-              echo "dir=$DIR" >> "$GITHUB_OUTPUT"
-              echo "Project root: $DIR"
+              echo "dir=$(dirname "$FOUND")" >> "$GITHUB_OUTPUT"
             else
-              echo "=== Contenu du dépôt ==="
-              find . -maxdepth 3 -type f ! -path "./.git/*" | head -80
-              echo "::error::Aucun fichier Gradle trouvé après extraction."
+              echo "::error::settings.gradle.kts introuvable"
+              find . -maxdepth 3 -type f ! -path "./.git/*" | head -50
               exit 1
             fi
           fi
+          echo "Project root: $(grep dir= "$GITHUB_OUTPUT" | cut -d= -f2)"
 
       - name: Set up JDK 17
         uses: actions/setup-java@v5
@@ -81,28 +57,59 @@ jobs:
           distribution: temurin
           java-version: 17
 
-      - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
+      # ubuntu-latest fournit déjà Android SDK — pas besoin de android-actions/setup-android
+      - name: Configure Android SDK & accept licenses
+        run: |
+          set -e
+          echo "ANDROID_HOME=${ANDROID_HOME:-/usr/local/lib/android/sdk}"
+          export ANDROID_HOME="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
+          export ANDROID_SDK_ROOT="$ANDROID_HOME"
+          echo "ANDROID_HOME=$ANDROID_HOME" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT" >> "$GITHUB_ENV"
+
+          # Localiser sdkmanager
+          SM=""
+          for p in \
+            "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" \
+            "$ANDROID_HOME/cmdline-tools/bin/sdkmanager" \
+            "$ANDROID_HOME/tools/bin/sdkmanager"; do
+            if [ -x "$p" ]; then SM="$p"; break; fi
+          done
+          # Chercher toute version cmdline-tools
+          if [ -z "$SM" ]; then
+            SM=$(find "$ANDROID_HOME/cmdline-tools" -name sdkmanager -type f 2>/dev/null | head -1 || true)
+          fi
+          echo "sdkmanager: $SM"
+
+          if [ -n "$SM" ]; then
+            # Accepter toutes les licences sans interaction
+            yes | "$SM" --licenses >/tmp/sdk-licenses.log 2>&1 || true
+            tail -5 /tmp/sdk-licenses.log || true
+            # Installer platform + build-tools nécessaires
+            yes | "$SM" "platforms;android-34" "build-tools;34.0.0" "platform-tools" >/tmp/sdk-install.log 2>&1 || true
+            tail -10 /tmp/sdk-install.log || true
+          else
+            echo "::warning::sdkmanager introuvable — on tente le build avec le SDK préinstallé"
+          fi
+
+          # local.properties pour Gradle
+          ROOT="${{ steps.root.outputs.dir }}"
+          echo "sdk.dir=$ANDROID_HOME" > "$ROOT/local.properties"
+          cat "$ROOT/local.properties"
 
       - name: Setup Gradle wrapper
         working-directory: ${{ steps.root.outputs.dir }}
         run: |
           if [ ! -f "gradle/wrapper/gradle-wrapper.jar" ]; then
-            echo "Génération du Gradle Wrapper..."
+            echo "Génération du Gradle Wrapper 8.2..."
             gradle wrapper --gradle-version 8.2
           fi
-          chmod +x gradlew 2>/dev/null || true
-          ls -la
-          ls -la gradle/wrapper/ || true
+          chmod +x gradlew
+          ./gradlew --version
 
       - name: Build debug APK
         working-directory: ${{ steps.root.outputs.dir }}
-        run: |
-          if [ -f ./gradlew ]; then
-            ./gradlew assembleDebug --stacktrace --no-daemon
-          else
-            gradle assembleDebug --stacktrace --no-daemon
-          fi
+        run: ./gradlew assembleDebug --stacktrace --no-daemon
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
