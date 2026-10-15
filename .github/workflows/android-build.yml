@@ -15,28 +15,62 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Extract project zip if present
+        run: |
+          set -e
+          # Cas 1 : le ZIP du projet est à la racine
+          if [ -f "FloatingBubbleApp.zip" ]; then
+            echo "Extraction de FloatingBubbleApp.zip..."
+            unzip -o FloatingBubbleApp.zip -d _extracted
+            # Si le zip contient un dossier FloatingBubbleApp/
+            if [ -d "_extracted/FloatingBubbleApp" ]; then
+              cp -a _extracted/FloatingBubbleApp/. .
+            else
+              cp -a _extracted/. .
+            fi
+            rm -rf _extracted
+            echo "Extraction terminée."
+          fi
+
+          # Cas 2 : un autre zip android à la racine
+          for z in *.zip; do
+            [ -f "$z" ] || continue
+            [ "$z" = "FloatingBubbleApp.zip" ] && continue
+            if unzip -l "$z" 2>/dev/null | grep -q "settings.gradle"; then
+              echo "Extraction de $z..."
+              unzip -o "$z" -d _extracted
+              if [ -d "_extracted/FloatingBubbleApp" ]; then
+                cp -a _extracted/FloatingBubbleApp/. .
+              else
+                cp -a _extracted/. .
+              fi
+              rm -rf _extracted
+              break
+            fi
+          done
+
+          echo "=== Fichiers après extraction ==="
+          find . -maxdepth 3 -type f ! -path "./.git/*" | head -60
+
       - name: Detect project root
         id: root
         run: |
-          # Si les fichiers Gradle sont à la racine
-          if [ -f "settings.gradle.kts" ] || [ -f "settings.gradle" ] || [ -f "build.gradle.kts" ] || [ -f "build.gradle" ]; then
+          if [ -f "settings.gradle.kts" ] || [ -f "settings.gradle" ]; then
             echo "dir=." >> "$GITHUB_OUTPUT"
             echo "Project root: ."
-          # Si le projet est dans un sous-dossier (ex. FloatingBubbleApp/)
           elif [ -f "FloatingBubbleApp/settings.gradle.kts" ]; then
             echo "dir=FloatingBubbleApp" >> "$GITHUB_OUTPUT"
             echo "Project root: FloatingBubbleApp"
           else
-            # Chercher le premier settings.gradle*
-            FOUND=$(find . -maxdepth 3 -name "settings.gradle.kts" -o -name "settings.gradle" 2>/dev/null | head -1)
+            FOUND=$(find . -maxdepth 3 \( -name "settings.gradle.kts" -o -name "settings.gradle" \) ! -path "./.git/*" 2>/dev/null | head -1)
             if [ -n "$FOUND" ]; then
               DIR=$(dirname "$FOUND")
               echo "dir=$DIR" >> "$GITHUB_OUTPUT"
               echo "Project root: $DIR"
             else
               echo "=== Contenu du dépôt ==="
-              find . -maxdepth 3 -type f | head -80
-              echo "::error::Aucun fichier Gradle trouvé. Placez settings.gradle.kts à la racine du dépôt."
+              find . -maxdepth 3 -type f ! -path "./.git/*" | head -80
+              echo "::error::Aucun fichier Gradle trouvé après extraction."
               exit 1
             fi
           fi
@@ -46,22 +80,20 @@ jobs:
         with:
           distribution: temurin
           java-version: 17
-          # Ne pas activer cache: gradle si les fichiers ne sont pas encore détectés à la racine
-          # Le cache est géré manuellement après détection du root
 
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
 
-      - name: Setup Gradle wrapper if missing
+      - name: Setup Gradle wrapper
         working-directory: ${{ steps.root.outputs.dir }}
         run: |
-          if [ ! -f "./gradlew" ] || [ ! -f "gradle/wrapper/gradle-wrapper.jar" ]; then
+          if [ ! -f "gradle/wrapper/gradle-wrapper.jar" ]; then
             echo "Génération du Gradle Wrapper..."
-            gradle wrapper --gradle-version 8.2 || true
+            gradle wrapper --gradle-version 8.2
           fi
           chmod +x gradlew 2>/dev/null || true
           ls -la
-          ls -la gradle/wrapper/ 2>/dev/null || true
+          ls -la gradle/wrapper/ || true
 
       - name: Build debug APK
         working-directory: ${{ steps.root.outputs.dir }}
